@@ -18,6 +18,91 @@ async def check_subscription(bot, user_id: int) -> bool:
         print(f"Subscription check error for {user_id}: {e}")
         return False
 
+# Helper to check if a player has any active moves left
+def has_actions_left(player: Player, match: Match) -> bool:
+    has_q = match.max_questions is None or player.questions_count < match.max_questions
+    has_g = match.max_guesses is None or player.guesses_count < match.max_guesses
+    return has_q or has_g
+
+# Helper to generate the player's turn keyboard based on limits
+def get_turn_keyboard(player: Player, match: Match):
+    builder = InlineKeyboardBuilder()
+    
+    show_ask = match.max_questions is None or player.questions_count < match.max_questions
+    show_guess = match.max_guesses is None or player.guesses_count < match.max_guesses
+    
+    if show_ask:
+        builder.button(text="❓ طرح سؤال", callback_data="turn_action:ask")
+    if show_guess:
+        builder.button(text="🎯 إعلان تخمين", callback_data="turn_action:guess")
+        
+    builder.button(text="🚪 انسحاب", callback_data="turn_action:withdraw")
+    
+    buttons_count = (1 if show_ask else 0) + (1 if show_guess else 0) + 1
+    builder.adjust(2 if buttons_count >= 2 else 1)
+    
+    return builder.as_markup(), show_ask, show_guess
+
+# Game loop organizer to start/continue player turn
+async def start_player_turn(bot, storage, match: Match):
+    p = match.get_current_player()
+    opponent = match.get_opponent(p.user_id)
+    bot_info = await bot.get_me()
+    
+    # 1. Check if the current player has any moves left
+    if not has_actions_left(p, match):
+        # Check if the opponent also has no moves left
+        if not has_actions_left(opponent, match):
+            # Both out of moves -> DRAW!
+            await end_match(bot, storage, match, winner=None, loser=None, reason="draw")
+            return
+            
+        # Only current player is out of moves -> Skip their turn
+        try:
+            await bot.send_message(
+                chat_id=p.user_id,
+                text="⚠️ <b>لقد استنفدت جميع أسئلتك وتخميناتك المتاحة في هذه المباراة!</b>\n"
+                     "تم تخطي دورك تلقائياً ونقل الدور إلى خصمك.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+            
+        # Switch turn
+        match.switch_turn()
+        
+        # Update channel message to reflect turn change
+        try:
+            await bot.edit_message_text(
+                chat_id=match.channel_id,
+                message_id=match.channel_message_id,
+                text=match.format_match_message(bot_info.username),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"Error editing message on turn skip: {e}")
+            
+        # Recurse to trigger turn for opponent
+        await start_player_turn(bot, storage, match)
+        return
+        
+    # 2. Trigger standard turn selection
+    markup, _, _ = get_turn_keyboard(p, match)
+    try:
+        await bot.send_message(
+            chat_id=p.user_id,
+            text="🔔 <b>إنه دورك الآن!</b> يرجى اختيار إجراءك:",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        await bot.send_message(
+            chat_id=opponent.user_id,
+            text=f"⏳ إنه دور خصمك الآن (<b>{p.full_name}</b>). بانتظار خطوته.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Error sending turn notifications: {e}")
+
 # Player Joins Match from Channel
 @router.callback_query(F.data.startswith("join_match:"))
 async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
@@ -74,7 +159,6 @@ async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
         return
 
     # 4. Verify if the user has started the bot in private.
-    # We attempt to send them the confirmation message FIRST. If it fails, they cannot join.
     try:
         await callback.bot.send_message(
             chat_id=user_id,
@@ -189,9 +273,6 @@ async def process_secret_word(message: types.Message, state: FSMContext):
         match.state = MatchState.PLAYING
         match.turn_index = 0 # Player 1's turn
         
-        p1 = match.players[0]
-        p2 = match.players[1]
-        
         # Update channel message to playing status
         try:
             await message.bot.edit_message_text(
@@ -203,23 +284,8 @@ async def process_secret_word(message: types.Message, state: FSMContext):
         except Exception as e:
             print(f"Error editing message: {e}")
             
-        # Notify players and display turn choices for Player 1
-        try:
-            await message.bot.send_message(
-                chat_id=p1.user_id,
-                text=f"🎉 تم اختيار الكلمات السرية بنجاح وبدأت المباراة!\n\n"
-                     f"دورك الآن. يرجى اختيار إجراء للبدء:",
-                reply_markup=get_turn_keyboard(),
-                parse_mode="HTML"
-            )
-            await message.bot.send_message(
-                chat_id=p2.user_id,
-                text=f"🎉 تم اختيار الكلمات السرية بنجاح وبدأت المباراة!\n\n"
-                     f"الدور الحالي عند خصمك (<b>{p1.full_name}</b>). يرجى الانتظار حتى يحين دورك.",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Error notifying players: {e}")
+        # Notify players and start the first turn dynamically
+        await start_player_turn(message.bot, state.storage, match)
             
     else:
         # Only one submitted, notify this player and wait
@@ -228,15 +294,6 @@ async def process_secret_word(message: types.Message, state: FSMContext):
             f"بانتظار أن يكتب خصمك كلمته السرية لبدء اللعب فوراً.",
             parse_mode="HTML"
         )
-
-# Get the player's turn keyboard
-def get_turn_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❓ طرح سؤال", callback_data="turn_action:ask")
-    builder.button(text="🎯 إعلان تخمين", callback_data="turn_action:guess")
-    builder.button(text="🚪 انسحاب", callback_data="turn_action:withdraw")
-    builder.adjust(2)
-    return builder.as_markup()
 
 # Handle Turn Actions
 @router.callback_query(F.data.startswith("turn_action:"))
@@ -328,7 +385,7 @@ async def process_question(message: types.Message, state: FSMContext):
 
 # Handle Question Answer
 @router.callback_query(F.data.startswith("answer_question:"))
-async def handle_question_answer(callback: types.CallbackQuery):
+async def handle_question_answer(callback: types.CallbackQuery, state: FSMContext):
     ans_type = callback.data.split(":")[1]
     user_id = callback.from_user.id
     
@@ -393,15 +450,10 @@ async def handle_question_answer(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
     
-    # Trigger turn for the answerer
-    await callback.bot.send_message(
-        chat_id=answerer.user_id,
-        text=f"✅ تم إرسال إجابتك للخصم وتحديث القناة.\n\n"
-             f"🔔 <b>إنه دورك الآن!</b> يرجى اختيار إجراءك:",
-        reply_markup=get_turn_keyboard(),
-        parse_mode="HTML"
-    )
     await callback.answer()
+    
+    # Trigger turn for next player dynamically
+    await start_player_turn(callback.bot, state.storage, match)
 
 # Process Guess Input
 @router.message(PlayerStates.making_guess)
@@ -536,15 +588,10 @@ async def handle_guess_answer(callback: types.CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
         
-        # Trigger turn for opponent
-        await callback.bot.send_message(
-            chat_id=opponent.user_id,
-            text=f"✅ تم إرسال إجابتك للخصم وتحديث القناة.\n\n"
-                 f"🔔 <b>إنه دورك الآن!</b> يرجى اختيار إجراءك:",
-            reply_markup=get_turn_keyboard(),
-            parse_mode="HTML"
-        )
         await callback.answer()
+        
+        # Trigger turn for next player dynamically
+        await start_player_turn(callback.bot, state.storage, match)
 
 # End Match function (shared)
 async def end_match(bot, storage, match: Match, winner: Optional[Player], loser: Optional[Player], reason: str):
@@ -578,6 +625,9 @@ async def end_match(bot, storage, match: Match, winner: Optional[Player], loser:
     elif reason == "withdrawal" and winner:
         summary_title = f"🏁 <b>انتهت المباراة بانسحاب {loser.full_name}!</b> 🏁"
         result_text = f"🏆 <b>الفائز (بالانسحاب):</b> <a href='tg://user?id={winner.user_id}'>{winner.full_name}</a>\n"
+    elif reason == "draw":
+        summary_title = "🏁 <b>انتهت المباراة بالتعادل!</b> 🏁"
+        result_text = "🤝 <b>انتهت المباراة بالتعادل لنفاد جميع الأسئلة والتخمينات المتاحة لكلا اللاعبين.</b>\n"
     else:
         summary_title = "🏁 <b>انتهت المباراة!</b> 🏁"
         result_text = "انتهت المباراة بقرار إداري.\n"
@@ -609,7 +659,11 @@ async def end_match(bot, storage, match: Match, winner: Optional[Player], loser:
     # 4. Notify players and clean FSM contexts
     for p in match.players:
         try:
-            role_text = "🎉 <b>مبارك! لقد فزت في المباراة!</b> 🏆" if winner and p.user_id == winner.user_id else "🎮 <b>حظاً أوفر في المرة القادمة!</b>"
+            if reason == "draw":
+                role_text = "🤝 <b>انتهت المباراة بالتعادل! لقد نفدت كل الأسئلة والتخمينات لكلا الطرفين.</b>"
+            else:
+                role_text = "🎉 <b>مبارك! لقد فزت في المباراة!</b> 🏆" if winner and p.user_id == winner.user_id else "🎮 <b>حظاً أوفر في المرة القادمة!</b>"
+            
             await bot.send_message(
                 chat_id=p.user_id,
                 text=f"🏁 <b>انتهت المباراة!</b>\n\n"

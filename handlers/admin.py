@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -111,19 +112,84 @@ async def process_category_text(message: types.Message, state: FSMContext):
     if not category:
         await message.reply("⚠️ الرجاء كتابة اسم تصنيف صالح:")
         return
-    await setup_match(message, state, category)
+    
+    await state.update_data(category=category)
+    
+    # Prompt for questions limit
+    builder = InlineKeyboardBuilder()
+    builder.button(text="♾️ بلا حدود", callback_data="limit_questions:unlimited")
+    
+    await state.set_state(AdminStates.waiting_for_questions_limit)
+    await message.reply(
+        "❓ <b>تحديد حد الأسئلة لكل لاعب:</b>\n\n"
+        "يرجى كتابة عدد الأسئلة الأقصى المسموح به لكل لاعب كعدد رقمي (مثال: <code>15</code>)، أو اضغط على الزر أدناه لتكون الأسئلة بلا حدود:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
 
-async def setup_match(message: types.Message, state: FSMContext, category: str):
+# Questions Limit handlers
+@router.callback_query(AdminStates.waiting_for_questions_limit, F.data == "limit_questions:unlimited")
+async def process_questions_unlimited(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(max_questions=None)
+    await ask_guesses_limit(callback.message, state)
+    await callback.answer()
+
+@router.message(AdminStates.waiting_for_questions_limit)
+async def process_questions_number(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await message.reply("⚠️ يرجى إدخال عدد رقمي صحيح أكبر من صفر أو الضغط على زر (بلا حدود):")
+        return
+        
+    await state.update_data(max_questions=int(text))
+    await ask_guesses_limit(message, state)
+
+async def ask_guesses_limit(message: types.Message, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="♾️ بلا حدود", callback_data="limit_guesses:unlimited")
+    
+    await state.set_state(AdminStates.waiting_for_guesses_limit)
+    await message.reply(
+        "🎯 <b>تحديد حد التخمينات لكل لاعب:</b>\n\n"
+        "يرجى كتابة عدد التخمينات الأقصى المسموح به لكل لاعب كعدد رقمي (مثال: <code>3</code>)، أو اضغط على الزر أدناه لتكون التخمينات بلا حدود:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+
+# Guesses Limit handlers
+@router.callback_query(AdminStates.waiting_for_guesses_limit, F.data == "limit_guesses:unlimited")
+async def process_guesses_unlimited(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(max_guesses=None)
     data = await state.get_data()
+    await setup_match(callback.message, state, data)
+    await callback.answer()
+
+@router.message(AdminStates.waiting_for_guesses_limit)
+async def process_guesses_number(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await message.reply("⚠️ يرجى إدخال عدد رقمي صحيح أكبر من صفر أو الضغط على زر (بلا حدود):")
+        return
+        
+    await state.update_data(max_guesses=int(text))
+    data = await state.get_data()
+    await setup_match(message, state, data)
+
+async def setup_match(message: types.Message, state: FSMContext, data: dict):
     channel_id = data.get("channel_id")
     channel_title = data.get("channel_title")
-    creator_id = message.chat.id # admin who initiated it
+    category = data.get("category")
+    max_questions = data.get("max_questions")
+    max_guesses = data.get("max_guesses")
+    creator_id = message.chat.id
     
     # Reset FSM state for the admin
     await state.clear()
     
     # Create the match in registry
     match = registry.create_match(channel_id, channel_title, category, creator_id)
+    match.max_questions = max_questions
+    match.max_guesses = max_guesses
     
     # Create join button
     builder = InlineKeyboardBuilder()
@@ -145,10 +211,15 @@ async def setup_match(message: types.Message, state: FSMContext, category: str):
         )
         match.channel_message_id = channel_msg.message_id
         
+        q_limit_str = f"<b>{max_questions}</b>" if max_questions is not None else "<i>بلا حدود</i>"
+        g_limit_str = f"<b>{max_guesses}</b>" if max_guesses is not None else "<i>بلا حدود</i>"
+        
         await message.bot.send_message(
             chat_id=creator_id,
             text=f"✅ تم إنشاء المباراة بنجاح ونشر رسالة الانضمام في القناة <b>{channel_title}</b>!\n"
-                 f"🏷️ التصنيف المختار: <b>{category}</b>\n\n"
+                 f"🏷️ التصنيف: <b>{category}</b>\n"
+                 f"❓ حد الأسئلة: {q_limit_str}\n"
+                 f"🎯 حد التخمينات: {g_limit_str}\n\n"
                  f"بانتظار انضمام لاعبين اثنين...",
             parse_mode="HTML"
         )
@@ -164,7 +235,6 @@ async def setup_match(message: types.Message, state: FSMContext, category: str):
 # Cancel Match Command
 @router.message(Command("cancelmatch"))
 async def cmd_cancelmatch(message: types.Message):
-    # Find active matches where the user is an admin of the match's channel
     my_matches = []
     for m in registry.active_matches.values():
         try:
@@ -193,7 +263,6 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ المباراة غير موجودة أو انتهت بالفعل.", show_alert=True)
         return
         
-    # Check if the clicking user is admin/creator in the target channel
     try:
         user_member = await callback.bot.get_chat_member(match.channel_id, callback.from_user.id)
         if user_member.status not in ["administrator", "creator"]:
@@ -203,7 +272,6 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ فشل التحقق من صلاحيات الإشراف الخاصة بك.", show_alert=True)
         return
         
-    # Notify players
     for p in match.players:
         try:
             await callback.bot.send_message(
@@ -212,7 +280,6 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
                 reply_markup=types.ReplyKeyboardRemove(),
                 parse_mode="HTML"
             )
-            # Clear player state using the base StorageKey
             state_context = FSMContext(
                 storage=state.storage,
                 key=StorageKey(
@@ -225,13 +292,11 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             print(f"Error notifying player: {e}")
             
-    # Delete the channel message
     try:
         await callback.bot.delete_message(chat_id=match.channel_id, message_id=match.channel_message_id)
     except Exception as e:
         print(f"Error deleting message: {e}")
         
-    # Post cancellation notification in channel
     try:
         await callback.bot.send_message(
             chat_id=match.channel_id,
@@ -241,8 +306,6 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         print(f"Error writing to channel: {e}")
         
-    # Remove match from registry
     registry.remove_match(match_id)
-    
     await callback.answer("✅ تم إلغاء المباراة وحذفها بنجاح.", show_alert=True)
     await callback.message.edit_text("✅ تم إلغاء المباراة بنجاح وتنبيه اللاعبين.")
