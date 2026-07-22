@@ -1,4 +1,6 @@
 import uuid
+import json
+import os
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -35,6 +37,13 @@ class Match:
         self.channel_message_id: Optional[int] = None
         self.history: List[str] = []
         
+        # Turn limits (None means unlimited)
+        self.max_questions: Optional[int] = None
+        self.max_guesses: Optional[int] = None
+        
+        # Flag if match is played in a group instead of a channel
+        self.is_group_match: bool = False
+        
         # Pending turn actions
         self.pending_question: Optional[dict] = None  # {"text": str}
         self.pending_guess: Optional[dict] = None     # {"text": str}
@@ -69,19 +78,23 @@ class Match:
         p1_name = f"<a href='tg://user?id={p1.user_id}'>{p1.full_name}</a>" if p1 else "بانتظار الانضمام..."
         p2_name = f"<a href='tg://user?id={p2.user_id}'>{p2.full_name}</a>" if p2 else "بانتظار الانضمام..."
         
-        p1_q = p1.questions_count if p1 else 0
-        p2_q = p2.questions_count if p2 else 0
+        p1_q = f"{p1.questions_count}/{self.max_questions}" if self.max_questions is not None and p1 else (p1.questions_count if p1 else 0)
+        p2_q = f"{p2.questions_count}/{self.max_questions}" if self.max_questions is not None and p2 else (p2.questions_count if p2 else 0)
         
-        p1_g = p1.guesses_count if p1 else 0
-        p2_g = p2.guesses_count if p2 else 0
+        p1_g = f"{p1.guesses_count}/{self.max_guesses}" if self.max_guesses is not None and p1 else (p1.guesses_count if p1 else 0)
+        p2_g = f"{p2.guesses_count}/{self.max_guesses}" if self.max_guesses is not None and p2 else (p2.guesses_count if p2 else 0)
         
         current_player = self.get_current_player()
         current_turn_name = current_player.full_name if current_player else "—"
         
-        text = (
-            f"🎮 <b>مباراة Mythikra جديدة!</b>\n"
-            f"📢 <b>القناة:</b> {self.channel_title}\n"
-            f"🏷️ <b>التصنيف:</b> {self.category}\n\n"
+        place_label = "المجموعة" if self.is_group_match else "القناة"
+        
+        text = f"🎮 <b>مباراة Mythikra جديدة!</b>\n"
+        if not self.is_group_match:
+            text += f"📢 <b>{place_label}:</b> {self.channel_title}\n"
+        text += f"🏷️ <b>التصنيف:</b> {self.category}\n\n"
+        
+        text += (
             f"👤 <b>اللاعب الأول:</b> {p1_name}\n"
             f"👤 <b>اللاعب الثاني:</b> {p2_name}\n\n"
         )
@@ -115,12 +128,34 @@ class MatchRegistry:
         self.channel_matches: Dict[int, Match] = {}      # channel_id -> Match
         self.user_matches: Dict[int, Match] = {}         # user_id -> Match (currently playing)
         self.admin_creation: Dict[int, dict] = {}        # admin_id -> temp match creation state
+        
+        # Channels persistence file
+        self.saved_channels_file = "saved_channels.json"
+
+    def load_saved_channels(self) -> Dict[str, str]:
+        if not os.path.exists(self.saved_channels_file):
+            return {}
+        try:
+            with open(self.saved_channels_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading saved channels: {e}")
+            return {}
+
+    def save_channel(self, channel_id: int, channel_title: str):
+        channels = self.load_saved_channels()
+        channels[str(channel_id)] = channel_title
+        try:
+            with open(self.saved_channels_file, 'w', encoding='utf-8') as f:
+                json.dump(channels, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"Error saving channel: {e}")
 
     def create_match(self, channel_id: int, channel_title: str, category: str, creator_id: int) -> Match:
         # Generate short unique match ID
         match_id = uuid.uuid4().hex[:8]
         
-        # If there's already a match in this channel, we will replace it or cancel it
+        # If there's already a match in this channel/group, we will replace/cancel it
         if channel_id in self.channel_matches:
             old_match = self.channel_matches[channel_id]
             self.remove_match(old_match.match_id)

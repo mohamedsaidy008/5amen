@@ -10,3 +10,6 @@ class PlayerStates(StatesGroup):
     choosing_word = State()
     asking_question = State()
     making_guess = State()
+
+class WelcomeStates(StatesGroup):
+    waiting_for_welcome_text = State()
