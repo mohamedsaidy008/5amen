@@ -83,6 +83,14 @@ async def handle_member_left(event: ChatMemberUpdated):
         }
         save_welcome_settings(settings)
         
+        # Post a notification in the channel announcing that the member left and was banned
+        leave_msg = f"🚪 <b>غادر العضو <a href='tg://user?id={user_id}'>{name}</a> القناة، وتم حظره تلقائياً!</b> 🚫"
+        await event.bot.send_message(
+            chat_id=chat_id,
+            text=leave_msg,
+            parse_mode="HTML"
+        )
+        
         print(f"User {name} ({user_id}) left chat {chat_id} and was banned automatically.")
     except Exception as e:
         print(f"Error banning user {user_id} on leave in chat {chat_id}: {e}")
