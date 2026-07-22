@@ -13,18 +13,80 @@ router = Router()
 
 @router.message(Command("newmatch"))
 async def cmd_newmatch(message: types.Message, state: FSMContext):
+    # Check if this command is run in a Group or Supergroup chat
+    if message.chat.type in ["group", "supergroup"]:
+        # Setup match directly in the group, bypassing channel select & user admin checks
+        await state.update_data(
+            channel_id=message.chat.id,
+            channel_title=message.chat.title,
+            is_group_match=True
+        )
+        await state.set_state(AdminStates.waiting_for_category)
+        await message.reply(
+            "🎮 <b>بدء مباراة Mythikra جديدة في هذه المجموعة!</b>\n\n"
+            "🏷️ يرجى كتابة <b>تصنيف المباراة</b> الآن كرسالة نصية مباشرة (مثال: <code>الحيوانات</code>، <code>الدول</code>، <code>كرة القدم</code>):",
+            parse_mode="HTML"
+        )
+        return
+
+    # If run in Private Chat
     await state.set_state(AdminStates.waiting_for_channel)
-    await message.reply(
+    
+    # Load previously saved channels
+    saved_channels = registry.load_saved_channels()
+    
+    text = (
         "📢 <b>إنشاء مباراة جديدة:</b>\n\n"
         "يرجى إرسال معرف القناة المستهدفة، أو رابطها الكامل، أو قم <b>بتحويل (Forward)</b> أي رسالة من تلك القناة إلى هنا مباشرة.\n\n"
-        "<b>أمثلة للمدخلات المقبولة:</b>\n"
-        "• معرف عادي: <code>@mythikra</code>\n"
-        "• رابط عام: <code>https://t.me/mythikra</code>\n"
-        "• رابط خاص: <code>https://t.me/c/1234567890/12</code>\n"
-        "• تحويل رسالة مباشرة من القناة للبوت.\n\n"
-        "<i>ملاحظة: سيتحقق البوت تلقائياً من أنك مشرف أو مالك في القناة المحددة للسماح لك ببدء اللعب.</i>",
-        parse_mode="HTML"
     )
+    
+    if saved_channels:
+        builder = InlineKeyboardBuilder()
+        for cid, ctitle in saved_channels.items():
+            builder.button(text=f"📢 {ctitle}", callback_data=f"select_channel:{cid}")
+        builder.adjust(1)
+        
+        text += "💡 <b>أو اختر إحدى القنوات المستخدمة سابقاً من الأزرار أدناه:</b>"
+        await message.reply(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        text += (
+            "<b>أمثلة للمدخلات المقبولة:</b>\n"
+            "• معرف عادي: <code>@mythikra</code>\n"
+            "• رابط عام: <code>https://t.me/mythikra</code>\n"
+            "• رابط خاص: <code>https://t.me/c/1234567890/12</code>\n"
+            "• تحويل رسالة مباشرة من القناة للبوت.\n\n"
+            "<i>ملاحظة: سيتحقق البوت تلقائياً من أنك مشرف أو مالك في القناة المحددة للسماح لك ببدء اللعب.</i>"
+        )
+        await message.reply(text, parse_mode="HTML")
+
+@router.callback_query(AdminStates.waiting_for_channel, F.data.startswith("select_channel:"))
+async def handle_select_saved_channel(callback: types.CallbackQuery, state: FSMContext):
+    channel_id = int(callback.data.split(":")[1])
+    try:
+        chat = await callback.bot.get_chat(channel_id)
+        
+        # Verify bot permissions
+        bot_member = await callback.bot.get_chat_member(chat.id, callback.bot.id)
+        if bot_member.status not in ["administrator", "creator"]:
+            await callback.answer("⚠️ لست مشرفاً في هذه القناة حالياً!", show_alert=True)
+            return
+            
+        # Verify user permissions
+        user_member = await callback.bot.get_chat_member(chat.id, callback.from_user.id)
+        if user_member.status not in ["administrator", "creator"]:
+            await callback.answer("⚠️ يجب أن تكون مشرفاً في القناة المحددة لبدء مباراة فيها!", show_alert=True)
+            return
+            
+        await state.update_data(channel_id=chat.id, channel_title=chat.title, is_group_match=False)
+        await state.set_state(AdminStates.waiting_for_category)
+        
+        await callback.message.edit_text(
+            f"✅ تم تحديد القناة: <b>{chat.title}</b>\n\n"
+            f"🏷️ يرجى كتابة <b>تصنيف المباراة</b> وإرساله الآن كرسالة نصية مباشرة:",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await callback.answer(f"⚠️ فشل التحقق من القناة المحفوظة: {str(e)}", show_alert=True)
 
 @router.message(AdminStates.waiting_for_channel)
 async def process_channel(message: types.Message, state: FSMContext):
@@ -88,7 +150,7 @@ async def process_channel(message: types.Message, state: FSMContext):
             return
             
         # Store in FSM
-        await state.update_data(channel_id=chat.id, channel_title=chat.title)
+        await state.update_data(channel_id=chat.id, channel_title=chat.title, is_group_match=False)
         
         await state.set_state(AdminStates.waiting_for_category)
         await message.reply(
@@ -181,15 +243,21 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
     category = data.get("category")
     max_questions = data.get("max_questions")
     max_guesses = data.get("max_guesses")
+    is_group_match = data.get("is_group_match", False)
     creator_id = message.chat.id
     
-    # Reset FSM state for the admin
+    # Reset FSM state
     await state.clear()
     
     # Create the match in registry
     match = registry.create_match(channel_id, channel_title, category, creator_id)
     match.max_questions = max_questions
     match.max_guesses = max_guesses
+    match.is_group_match = is_group_match
+    
+    # Save channel if it is a channel match (for future quick selection)
+    if not is_group_match:
+        registry.save_channel(channel_id, channel_title)
     
     # Create join button
     builder = InlineKeyboardBuilder()
@@ -202,7 +270,7 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
     msg_text = match.format_match_message(bot_info.username)
     
     try:
-        # Post join message to channel
+        # Post join message to channel or group directly
         channel_msg = await message.bot.send_message(
             chat_id=channel_id,
             text=msg_text,
@@ -214,20 +282,31 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
         q_limit_str = f"<b>{max_questions}</b>" if max_questions is not None else "<i>بلا حدود</i>"
         g_limit_str = f"<b>{max_guesses}</b>" if max_guesses is not None else "<i>بلا حدود</i>"
         
-        await message.bot.send_message(
-            chat_id=creator_id,
-            text=f"✅ تم إنشاء المباراة بنجاح ونشر رسالة الانضمام في القناة <b>{channel_title}</b>!\n"
-                 f"🏷️ التصنيف: <b>{category}</b>\n"
-                 f"❓ حد الأسئلة: {q_limit_str}\n"
-                 f"🎯 حد التخمينات: {g_limit_str}\n\n"
-                 f"بانتظار انضمام لاعبين اثنين...",
-            parse_mode="HTML"
-        )
+        if is_group_match:
+            await message.reply(
+                f"✅ <b>بدأت مرحلة الانضمام داخل هذه المجموعة!</b>\n"
+                f"🏷️ التصنيف: <b>{category}</b>\n"
+                f"❓ حد الأسئلة: {q_limit_str}\n"
+                f"🎯 حد التخمينات: {g_limit_str}\n\n"
+                f"بانتظار انضمام لاعبين اثنين...",
+                parse_mode="HTML"
+            )
+        else:
+            await message.bot.send_message(
+                chat_id=creator_id,
+                text=f"✅ تم إنشاء المباراة بنجاح ونشر رسالة الانضمام في القناة <b>{channel_title}</b>!\n"
+                     f"🏷️ التصنيف: <b>{category}</b>\n"
+                     f"❓ حد الأسئلة: {q_limit_str}\n"
+                     f"🎯 حد التخمينات: {g_limit_str}\n\n"
+                     f"بانتظار انضمام لاعبين اثنين...",
+                parse_mode="HTML"
+            )
     except Exception as e:
         registry.remove_match(match.match_id)
+        reply_to_id = creator_id if not is_group_match else channel_id
         await message.bot.send_message(
-            chat_id=creator_id,
-            text=f"⚠️ فشل نشر رسالة المباراة في القناة. تأكد من صلاحية إرسال الرسائل للبوت.\n\n"
+            chat_id=reply_to_id,
+            text=f"⚠️ فشل نشر رسالة المباراة. تأكد من صلاحية إرسال الرسائل للبوت.\n\n"
                  f"تفاصيل الخطأ: <code>{str(e)}</code>",
             parse_mode="HTML"
         )
@@ -235,17 +314,35 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
 # Cancel Match Command
 @router.message(Command("cancelmatch"))
 async def cmd_cancelmatch(message: types.Message):
+    # If in group, check if there's a match in this group, and let anyone cancel (or check creator/admin)
+    if message.chat.type in ["group", "supergroup"]:
+        match = registry.get_match_by_channel(message.chat.id)
+        if not match:
+            await message.reply("ℹ️ لا توجد مباراة نشطة في هذه المجموعة حالياً.")
+            return
+            
+        builder = InlineKeyboardBuilder()
+        builder.button(text="❌ إلغاء المباراة جارية", callback_data=f"cancel_match:{match.match_id}")
+        await message.reply("🛡️ هل أنت متأكد من إلغاء المباراة الحالية؟", reply_markup=builder.as_markup())
+        return
+
+    # If in private
     my_matches = []
     for m in registry.active_matches.values():
         try:
-            member = await message.bot.get_chat_member(m.channel_id, message.from_user.id)
-            if member.status in ["administrator", "creator"]:
-                my_matches.append(m)
+            # For group matches, creator of match is the creator_id
+            if m.is_group_match:
+                if m.creator_id == message.chat.id:
+                    my_matches.append(m)
+            else:
+                member = await message.bot.get_chat_member(m.channel_id, message.from_user.id)
+                if member.status in ["administrator", "creator"]:
+                    my_matches.append(m)
         except Exception:
             pass
             
     if not my_matches:
-        await message.reply("ℹ️ لا توجد مباريات نشطة في قنوات تكون مشرفاً فيها حالياً.")
+        await message.reply("ℹ️ لا توجد مباريات نشطة قمت بإنشائها أو تملك صلاحية إدارتها حالياً.")
         return
         
     builder = InlineKeyboardBuilder()
@@ -263,15 +360,18 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ المباراة غير موجودة أو انتهت بالفعل.", show_alert=True)
         return
         
-    try:
-        user_member = await callback.bot.get_chat_member(match.channel_id, callback.from_user.id)
-        if user_member.status not in ["administrator", "creator"]:
-            await callback.answer("⚠️ ليس لديك صلاحية إلغاء هذه المباراة (يجب أن تكون مشرفاً في القناة).", show_alert=True)
+    # Verify cancellation permissions
+    if not match.is_group_match:
+        try:
+            user_member = await callback.bot.get_chat_member(match.channel_id, callback.from_user.id)
+            if user_member.status not in ["administrator", "creator"]:
+                await callback.answer("⚠️ ليس لديك صلاحية إلغاء هذه المباراة (يجب أن تكون مشرفاً في القناة).", show_alert=True)
+                return
+        except Exception:
+            await callback.answer("⚠️ فشل التحقق من صلاحيات الإشراف الخاصة بك.", show_alert=True)
             return
-    except Exception:
-        await callback.answer("⚠️ فشل التحقق من صلاحيات الإشراف الخاصة بك.", show_alert=True)
-        return
-        
+            
+    # Notify players
     for p in match.players:
         try:
             await callback.bot.send_message(
@@ -292,20 +392,25 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             print(f"Error notifying player: {e}")
             
+    # Delete the channel/group message
     try:
         await callback.bot.delete_message(chat_id=match.channel_id, message_id=match.channel_message_id)
     except Exception as e:
         print(f"Error deleting message: {e}")
         
+    # Post cancellation notification in channel/group
     try:
         await callback.bot.send_message(
             chat_id=match.channel_id,
-            text=f"🛑 <b>مباراة لغز التخمين (التصنيف: {match.category}) تم إلغاؤها من قبل المدير.</b>",
+            text=f"🛑 <b>مباراة لغز التخمين (التصنيف: {match.category}) تم إلغاؤها.</b>",
             parse_mode="HTML"
         )
     except Exception as e:
-        print(f"Error writing to channel: {e}")
+        print(f"Error writing cancellation message: {e}")
         
     registry.remove_match(match_id)
     await callback.answer("✅ تم إلغاء المباراة وحذفها بنجاح.", show_alert=True)
-    await callback.message.edit_text("✅ تم إلغاء المباراة بنجاح وتنبيه اللاعبين.")
+    if callback.message.chat.type == "private":
+        await callback.message.edit_text("✅ تم إلغاء المباراة بنجاح وتنبيه اللاعبين.")
+    else:
+        await callback.message.delete()

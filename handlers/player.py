@@ -43,11 +43,42 @@ def get_turn_keyboard(player: Player, match: Match):
     
     return builder.as_markup(), show_ask, show_guess
 
+# Unified helper to update the active match status message
+async def update_match_message(bot, match: Match):
+    try:
+        bot_info = await bot.get_me()
+        text = match.format_match_message(bot_info.username)
+        
+        markup = None
+        if match.state == MatchState.JOINING:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_match:{match.match_id}")
+            markup = builder.as_markup()
+            
+        if match.channel_id == 0:  # Inline match
+            await bot.edit_message_text(
+                inline_message_id=match.channel_message_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        else:  # Group or Channel match
+            await bot.edit_message_text(
+                chat_id=match.channel_id,
+                message_id=match.channel_message_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+    except Exception as e:
+        print(f"Error updating match message: {e}")
+
 # Game loop organizer to start/continue player turn
 async def start_player_turn(bot, storage, match: Match):
     p = match.get_current_player()
     opponent = match.get_opponent(p.user_id)
-    bot_info = await bot.get_me()
     
     # 1. Check if the current player has any moves left
     if not has_actions_left(p, match):
@@ -71,16 +102,8 @@ async def start_player_turn(bot, storage, match: Match):
         # Switch turn
         match.switch_turn()
         
-        # Update channel message to reflect turn change
-        try:
-            await bot.edit_message_text(
-                chat_id=match.channel_id,
-                message_id=match.channel_message_id,
-                text=match.format_match_message(bot_info.username),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Error editing message on turn skip: {e}")
+        # Update match message
+        await update_match_message(bot, match)
             
         # Recurse to trigger turn for opponent
         await start_player_turn(bot, storage, match)
@@ -103,7 +126,7 @@ async def start_player_turn(bot, storage, match: Match):
     except Exception as e:
         print(f"Error sending turn notifications: {e}")
 
-# Player Joins Match from Channel
+# Player Joins Match from Channel/Group/Inline
 @router.callback_query(F.data.startswith("join_match:"))
 async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
     match_id = callback.data.split(":")[1]
@@ -158,6 +181,11 @@ async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ عذراً، اكتمل عدد اللاعبين أو انتهت فترة الانضمام.", show_alert=True)
         return
 
+    # If it's an inline match and we haven't stored the inline message ID yet
+    if match.channel_id == 0 and not match.channel_message_id:
+        if callback.inline_message_id:
+            match.channel_message_id = callback.inline_message_id
+
     # 4. Verify if the user has started the bot in private.
     try:
         await callback.bot.send_message(
@@ -184,41 +212,18 @@ async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
         
     await callback.answer("✅ تم انضمامك بنجاح!")
 
-    # Update channel message
+    # Update channel/group/inline message
     if len(match.players) == 1:
-        try:
-            builder = InlineKeyboardBuilder()
-            builder.button(text="🎮 انضمام", callback_data=f"join_match:{match.match_id}")
-            await callback.bot.edit_message_text(
-                chat_id=match.channel_id,
-                message_id=match.channel_message_id,
-                text=match.format_match_message(bot_info.username),
-                reply_markup=builder.as_markup(),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Error editing join message: {e}")
+        await update_match_message(callback.bot, match)
             
     elif len(match.players) == 2:
         # Match is now full, move to CHOOSING_WORDS
         match.state = MatchState.CHOOSING_WORDS
-        
-        try:
-            # Edit channel message to remove the join button
-            await callback.bot.edit_message_text(
-                chat_id=match.channel_id,
-                message_id=match.channel_message_id,
-                text=match.format_match_message(bot_info.username),
-                reply_markup=None,
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Error editing join message (full): {e}")
+        await update_match_message(callback.bot, match)
             
         # Notify both players to input their secret words
         for p in match.players:
             try:
-                # Set FSM state for each player to type their word using state.storage & StorageKey
                 p_state = FSMContext(
                     storage=state.storage,
                     key=StorageKey(
@@ -265,24 +270,13 @@ async def process_secret_word(message: types.Message, state: FSMContext):
     # Check if both players have submitted words
     all_submitted = all(p.secret_word is not None for p in match.players)
     
-    # Get bot info dynamically
-    bot_info = await message.bot.get_me()
-    
     if all_submitted and len(match.players) == 2:
         # Move match straight to PLAYING
         match.state = MatchState.PLAYING
         match.turn_index = 0 # Player 1's turn
         
-        # Update channel message to playing status
-        try:
-            await message.bot.edit_message_text(
-                chat_id=match.channel_id,
-                message_id=match.channel_message_id,
-                text=match.format_match_message(bot_info.username),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Error editing message: {e}")
+        # Update match message
+        await update_match_message(message.bot, match)
             
         # Notify players and start the first turn dynamically
         await start_player_turn(message.bot, state.storage, match)
@@ -365,18 +359,19 @@ async def process_question(message: types.Message, state: FSMContext):
     
     opponent = match.get_opponent(user_id)
     
-    # Build yes/no keyboard for opponent
+    # Build yes/no/burned keyboard for opponent
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ نعم", callback_data="answer_question:yes")
     builder.button(text="❌ لا", callback_data="answer_question:no")
-    builder.adjust(2)
+    builder.button(text="🔥 سؤال محروق", callback_data="answer_question:burned")
+    builder.adjust(2, 1)
     
     # Send to opponent
     await message.bot.send_message(
         chat_id=opponent.user_id,
         text=f"❓ <b>سؤال موجه لك من خصمك ({current_player.full_name}):</b>\n"
              f"💬 <i>\"{question_text}\"</i>\n\n"
-             f"يرجى الإجابة عن السؤال بصدق وأمانة:",
+             f"يرجى الإجابة عن السؤال بصدق وأمانة، أو الاعتراض إذا كان مكرراً/محروقاً:",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -403,10 +398,48 @@ async def handle_question_answer(callback: types.CallbackQuery, state: FSMContex
     await callback.message.edit_reply_markup(reply_markup=None)
     
     question_text = match.pending_question["text"]
-    ans_emoji = "✅ نعم" if ans_type == "yes" else "❌ لا"
     
     asker = match.get_player_by_id(asker_id)
     answerer = match.get_player_by_id(user_id)
+    
+    # If the question was marked as burned
+    if ans_type == "burned":
+        # Log to match history
+        log_entry = (
+            f"👤 <b>{asker.full_name}:</b>\n"
+            f"💬 {question_text}\n"
+            f"الجواب: 🔥 سؤال محروق (مكرر)\n"
+            f"----------------------"
+        )
+        match.history.append(log_entry)
+        
+        # Clear pending question
+        match.pending_question = None
+        
+        # Update match message
+        await update_match_message(callback.bot, match)
+        
+        # Notify answerer (the one who clicked burned)
+        await callback.bot.send_message(
+            chat_id=answerer.user_id,
+            text=f"✅ تم تسجيل أن السؤال محروق. تم إعلام الخصم وإعطاؤه فرصة أخرى لطرح سؤال مغاير."
+        )
+        
+        # Notify asker and request another question (turn NOT switched)
+        await callback.bot.send_message(
+            chat_id=asker.user_id,
+            text=f"🔥 <b>اعترض الخصم على سؤالك الأخير معتبراً إياه سؤالاً محروقاً (مكرراً)!</b>\n"
+                 f"السؤال كان: <i>\"{question_text}\"</i>\n\n"
+                 f"الدور ما زال عندك. يرجى اختيار إجراء آخر وطرح سؤال مغاير:",
+            reply_markup=get_turn_keyboard(asker, match)[0],
+            parse_mode="HTML"
+        )
+        
+        await callback.answer()
+        return
+        
+    # If answered normally (Yes/No)
+    ans_emoji = "✅ نعم" if ans_type == "yes" else "❌ لا"
     
     # Add to history
     log_entry = (
@@ -417,7 +450,7 @@ async def handle_question_answer(callback: types.CallbackQuery, state: FSMContex
     )
     match.history.append(log_entry)
     
-    # Increment question count
+    # Increment question count only on normal answers
     asker.questions_count += 1
     
     # Clear pending question
@@ -426,19 +459,8 @@ async def handle_question_answer(callback: types.CallbackQuery, state: FSMContex
     # Switch turn
     match.switch_turn()
     
-    # Get bot info dynamically
-    bot_info = await callback.bot.get_me()
-    
-    # Update channel message
-    try:
-        await callback.bot.edit_message_text(
-            chat_id=match.channel_id,
-            message_id=match.channel_message_id,
-            text=match.format_match_message(bot_info.username),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        print(f"Error editing message: {e}")
+    # Update match message
+    await update_match_message(callback.bot, match)
         
     # Notify asker of the answer
     await callback.bot.send_message(
@@ -565,19 +587,8 @@ async def handle_guess_answer(callback: types.CallbackQuery, state: FSMContext):
         # Switch turn
         match.switch_turn()
         
-        # Get bot info dynamically
-        bot_info = await callback.bot.get_me()
-        
-        # Update channel message
-        try:
-            await callback.bot.edit_message_text(
-                chat_id=match.channel_id,
-                message_id=match.channel_message_id,
-                text=match.format_match_message(bot_info.username),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            print(f"Error editing message: {e}")
+        # Update match message
+        await update_match_message(callback.bot, match)
             
         # Notify guesser
         await callback.bot.send_message(
@@ -597,14 +608,7 @@ async def handle_guess_answer(callback: types.CallbackQuery, state: FSMContext):
 async def end_match(bot, storage, match: Match, winner: Optional[Player], loser: Optional[Player], reason: str):
     match.state = MatchState.FINISHED
     
-    # 1. Delete original match message in channel
-    if match.channel_message_id:
-        try:
-            await bot.delete_message(chat_id=match.channel_id, message_id=match.channel_message_id)
-        except Exception as e:
-            print(f"Error deleting match message from channel: {e}")
-            
-    # 2. Extract guesses list from history
+    # Extract guesses list from history
     guesses_list = []
     for entry in match.history:
         if "تخمين" in entry:
@@ -646,17 +650,36 @@ async def end_match(bot, storage, match: Match, winner: Optional[Player], loser:
         f"{guesses_str}"
     )
     
-    # 3. Post summary in channel
-    try:
-        await bot.send_message(
-            chat_id=match.channel_id,
-            text=summary_text,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        print(f"Error posting match summary to channel: {e}")
+    # Render final message in channel/group/inline query
+    if match.channel_id == 0:  # Inline match
+        try:
+            await bot.edit_message_text(
+                inline_message_id=match.channel_message_id,
+                text=summary_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            print(f"Error editing final summary of inline match: {e}")
+    else:  # Group or Channel match
+        # Delete original match message
+        if match.channel_message_id:
+            try:
+                await bot.delete_message(chat_id=match.channel_id, message_id=match.channel_message_id)
+            except Exception as e:
+                print(f"Error deleting match message: {e}")
+                
+        # Send new summary message
+        try:
+            await bot.send_message(
+                chat_id=match.channel_id,
+                text=summary_text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"Error posting match summary: {e}")
         
-    # 4. Notify players and clean FSM contexts
+    # Notify players and clean FSM contexts
     for p in match.players:
         try:
             if reason == "draw":
@@ -668,11 +691,11 @@ async def end_match(bot, storage, match: Match, winner: Optional[Player], loser:
                 chat_id=p.user_id,
                 text=f"🏁 <b>انتهت المباراة!</b>\n\n"
                      f"{role_text}\n\n"
-                     f"تم نشر النتائج التفصيلية والكلمات السرية في القناة.",
+                     f"تم نشر النتائج التفصيلية والكلمات السرية في القناة/المجموعة.",
                 parse_mode="HTML"
             )
             
-            # Clear FSM State using the passed storage and base StorageKey
+            # Clear FSM State
             state_context = FSMContext(
                 storage=storage,
                 key=StorageKey(
@@ -685,5 +708,5 @@ async def end_match(bot, storage, match: Match, winner: Optional[Player], loser:
         except Exception as e:
             print(f"Error cleaning FSM/notifying player {p.user_id}: {e}")
             
-    # 5. Clean up from registry
+    # Clean up from registry
     registry.remove_match(match.match_id)
