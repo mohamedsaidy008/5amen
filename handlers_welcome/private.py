@@ -2,10 +2,19 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import config
 from states import WelcomeStates
 from handlers_welcome.channel import load_welcome_settings, save_welcome_settings
 
 router = Router()
+
+async def check_subscription(bot, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=config.REQUIRED_CHANNEL, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        print(f"Subscription check error for {user_id}: {e}")
+        return False
 
 def get_settings_keyboard(settings: dict):
     builder = InlineKeyboardBuilder()
@@ -36,6 +45,20 @@ def get_settings_text(settings: dict) -> str:
 
 @router.message(Command("start"))
 async def welcome_start(message: types.Message):
+    # Subscription Check to REQUIRED_CHANNEL (@mythikra)
+    subscribed = await check_subscription(message.bot, message.from_user.id)
+    if not subscribed:
+        builder = InlineKeyboardBuilder()
+        channel_username = config.REQUIRED_CHANNEL.replace("@", "")
+        builder.button(text="📢 الاشتراك في القناة الرئيسية", url=f"https://t.me/{channel_username}")
+        await message.reply(
+            f"⚠️ <b>عذراً! لا يمكنك استخدام البوت أو التحكم بإعداداته قبل الاشتراك في القناة الرئيسية.</b>\n\n"
+            f"يرجى الاشتراك في القناة: {config.REQUIRED_CHANNEL} أولاً، ثم عُد وأرسل /start مجدداً.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        return
+
     settings = load_welcome_settings()
     await message.reply(
         get_settings_text(settings),
@@ -45,6 +68,12 @@ async def welcome_start(message: types.Message):
 
 @router.callback_query(F.data.startswith("welcome_action:"))
 async def process_welcome_actions(callback: types.CallbackQuery, state: FSMContext):
+    # Subscription Check
+    subscribed = await check_subscription(callback.bot, callback.from_user.id)
+    if not subscribed:
+        await callback.answer(f"⚠️ يجب عليك الاشتراك في القناة {config.REQUIRED_CHANNEL} أولاً!", show_alert=True)
+        return
+
     action = callback.data.split(":")[1]
     settings = load_welcome_settings()
     
@@ -86,6 +115,11 @@ async def process_welcome_actions(callback: types.CallbackQuery, state: FSMConte
 
 @router.message(WelcomeStates.waiting_for_welcome_text)
 async def process_new_welcome_text(message: types.Message, state: FSMContext):
+    subscribed = await check_subscription(message.bot, message.from_user.id)
+    if not subscribed:
+        await message.reply(f"⚠️ يجب عليك الاشتراك في القناة {config.REQUIRED_CHANNEL} أولاً!")
+        return
+
     new_text = message.text.strip()
     if not new_text:
         await message.reply("⚠️ يرجى إرسال نص ترحيب صالح:")
