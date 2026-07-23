@@ -3,7 +3,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineQueryResultArticle, InputTextMessageContent
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import config
-from models import registry
 import uuid
 
 router = Router()
@@ -67,36 +66,30 @@ async def cmd_help(message: types.Message):
     )
     await message.reply(text, parse_mode="HTML")
 
-# Inline query to start game challenge anywhere
+# Stateless Inline Query Handler
 @router.inline_query()
 async def handle_inline_query(inline_query: types.InlineQuery):
-    match_id = uuid.uuid4().hex[:8]
     user_query = inline_query.query.strip()
-    
     category = user_query if user_query else "عام"
     
     builder = InlineKeyboardBuilder()
-    builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_match:{match_id}")
+    builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_inline:{category}")
     
     text = (
         f"🎮 <b>تحدي مباراة تخمين جديدة!</b>\n"
         f"🏷️ <b>التصنيف:</b> {category}\n\n"
-        f"⏳ بانتظار انضمام لاعبين اثنين لبدء التحدي..."
+        f"⏳ بانتظار انضمام اللاعبين (0/2)..."
     )
     
-    # Register game with placeholder channel ID (0)
-    match = registry.create_match(0, "مباراة سريعة", category, inline_query.from_user.id)
-    match.is_group_match = True
-    
     description_text = (
-        f"التصنيف الحالي: ({category}) - اضغط لبدء التحدي"
+        f"التصنيف الحالي: ({category}) - اضغط لنشر التحدي"
         if user_query
         else "💡 اكتب اسم التصنيف بعد اسم البوت (مثال: @bot أفلام)"
     )
     
     results = [
         InlineQueryResultArticle(
-            id=match_id,
+            id=f"inline_{uuid.uuid4().hex[:6]}",
             title=f"🎮 بدء مباراة تخمين (التصنيف: {category})",
             description=description_text,
             input_message_content=InputTextMessageContent(

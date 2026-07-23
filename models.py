@@ -34,7 +34,7 @@ class Match:
         self.players: List[Player] = []
         self.turn_index: int = 0  # 0 or 1 (indicates index in self.players)
         
-        self.channel_message_id: Optional[int] = None
+        self.channel_message_id: Optional[str] = None
         self.history: List[str] = []
         
         # Turn limits (None means unlimited)
@@ -126,6 +126,7 @@ class MatchRegistry:
     def __init__(self):
         self.active_matches: Dict[str, Match] = {}       # match_id -> Match
         self.channel_matches: Dict[int, Match] = {}      # channel_id -> Match (excluding 0)
+        self.inline_matches: Dict[str, Match] = {}       # inline_message_id -> Match
         self.user_matches: Dict[int, Match] = {}         # user_id -> Match (currently playing)
         self.admin_creation: Dict[int, dict] = {}        # admin_id -> temp match creation state
         
@@ -154,10 +155,8 @@ class MatchRegistry:
             print(f"Error saving channel: {e}")
 
     def create_match(self, channel_id: int, channel_title: str, category: str, creator_id: int) -> Match:
-        # Generate short unique match ID
         match_id = uuid.uuid4().hex[:8]
         
-        # Only replace existing match if it's a specific channel/group (channel_id != 0)
         if channel_id != 0 and channel_id in self.channel_matches:
             old_match = self.channel_matches[channel_id]
             self.remove_match(old_match.match_id)
@@ -170,8 +169,22 @@ class MatchRegistry:
             self.channel_matches[channel_id] = match
         return match
 
+    def create_inline_match(self, inline_message_id: str, category: str, creator_id: int) -> Match:
+        match_id = uuid.uuid4().hex[:8]
+        match = Match(match_id, 0, "مباراة سريعة", category, creator_id)
+        match.is_group_match = True
+        match.channel_message_id = inline_message_id
+        match.state = MatchState.JOINING
+        
+        self.active_matches[match_id] = match
+        self.inline_matches[inline_message_id] = match
+        return match
+
     def get_match_by_id(self, match_id: str) -> Optional[Match]:
         return self.active_matches.get(match_id)
+
+    def get_match_by_inline_id(self, inline_message_id: str) -> Optional[Match]:
+        return self.inline_matches.get(inline_message_id)
 
     def get_match_by_channel(self, channel_id: int) -> Optional[Match]:
         if channel_id == 0:
@@ -179,15 +192,31 @@ class MatchRegistry:
         return self.channel_matches.get(channel_id)
 
     def get_match_by_user(self, user_id: int) -> Optional[Match]:
-        return self.user_matches.get(user_id)
+        # 1. Primary lookup
+        match = self.user_matches.get(user_id)
+        if match and match.state != MatchState.FINISHED:
+            return match
+            
+        # 2. Dynamic fallback search across all active matches
+        for m in self.active_matches.values():
+            if m.state != MatchState.FINISHED and m.get_player_by_id(user_id):
+                self.user_matches[user_id] = m
+                return m
+                
+        return None
 
     def add_player_to_match(self, match_id: str, user_id: int, full_name: str, username: Optional[str]) -> bool:
         match = self.get_match_by_id(match_id)
-        if not match or len(match.players) >= 2 or match.state != MatchState.JOINING:
+        if not match or match.state != MatchState.JOINING:
             return False
             
-        player = Player(user_id, full_name, username)
-        match.players.append(player)
+        existing = match.get_player_by_id(user_id)
+        if not existing:
+            if len(match.players) >= 2:
+                return False
+            player = Player(user_id, full_name, username)
+            match.players.append(player)
+            
         self.user_matches[user_id] = match
         return True
 
@@ -204,6 +233,10 @@ class MatchRegistry:
         # Remove from channel_matches
         if match.channel_id != 0 and match.channel_id in self.channel_matches:
             del self.channel_matches[match.channel_id]
+            
+        # Remove from inline_matches
+        if match.channel_message_id and match.channel_message_id in self.inline_matches:
+            del self.inline_matches[match.channel_message_id]
             
         # Remove from active_matches
         if match_id in self.active_matches:

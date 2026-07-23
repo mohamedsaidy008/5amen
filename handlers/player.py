@@ -52,7 +52,10 @@ async def update_match_message(bot, match: Match):
         markup = None
         if match.state == MatchState.JOINING:
             builder = InlineKeyboardBuilder()
-            builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_match:{match.match_id}")
+            if match.channel_id == 0:  # Inline match
+                builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_inline:{match.category}")
+            else:
+                builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_match:{match.match_id}")
             markup = builder.as_markup()
             
         if match.channel_id == 0:  # Inline match
@@ -74,6 +77,138 @@ async def update_match_message(bot, match: Match):
             )
     except Exception as e:
         print(f"Error updating match message: {e}")
+
+# Shared Player Join Routine
+async def join_player_to_match_process(callback: types.CallbackQuery, state: FSMContext, match: Match):
+    user_id = callback.from_user.id
+    full_name = callback.from_user.full_name
+    username = callback.from_user.username
+    bot_info = await callback.bot.get_me()
+    
+    # 1. Check if user is already in another match
+    existing_match = registry.get_match_by_user(user_id)
+    if existing_match and existing_match.match_id != match.match_id:
+        await callback.answer("⚠️ أنت بالفعل تشارك في مباراة أخرى حالياً!", show_alert=True)
+        return
+        
+    # 2. Check channel subscription
+    subscribed = await check_subscription(callback.bot, user_id)
+    if not subscribed:
+        await callback.answer(f"⚠️ لا يمكنك الانضمام قبل الاشتراك في القناة الرئيسية {config.REQUIRED_CHANNEL}.", show_alert=True)
+        
+        try:
+            builder = InlineKeyboardBuilder()
+            channel_username = config.REQUIRED_CHANNEL.replace("@", "")
+            builder.button(text=f"📢 الاشتراك في القناة الرئيسية ({config.REQUIRED_CHANNEL})", url=f"https://t.me/{channel_username}")
+            
+            await callback.bot.send_message(
+                chat_id=user_id,
+                text=f"⚠️ <b>عذراً! لا يمكنك الانضمام للمباراة قبل الاشتراك في القناة الرئيسية.</b>\n\n"
+                     f"يرجى الاشتراك في القناة: {config.REQUIRED_CHANNEL} أولاً، ثم عُد واضغط على زر الانضمام مجدداً.",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await callback.answer(
+                f"⚠️ يجب الاشتراك في قناة {config.REQUIRED_CHANNEL}\n"
+                f"ثم الانتقال إلى معرف البوت: @{bot_info.username} والضغط على (ابدأ / start) أولاً لتتمكن من اللعب!",
+                show_alert=True
+            )
+        return
+
+    # 3. Check if user is already in THIS match
+    if match.get_player_by_id(user_id):
+        await callback.answer("ℹ️ لقد انضممت بالفعل لهذه المباراة، بانتظار اللاعب الثاني...", show_alert=True)
+        return
+        
+    # 4. Verify match state and player count
+    if match.state != MatchState.JOINING or len(match.players) >= 2:
+        await callback.answer("⚠️ عذراً، اكتمل عدد اللاعبين أو انتهت فترة الانضمام.", show_alert=True)
+        return
+
+    # 5. Verify if the user has started the bot in private.
+    try:
+        await callback.bot.send_message(
+            chat_id=user_id,
+            text=f"🎮 <b>تم انضمامك لمباراة التخمين بنجاح!</b>\n"
+                 f"🏷️ التصنيف: <b>{match.category}</b>\n\n"
+                 f"⏳ بانتظار انضمام اللاعب الثاني لبدء المباراة...",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await callback.answer(
+            f"⚠️ يجب عليك بدء محادثة مع البوت في الخاص أولاً لتتمكن من الانضمام للعب!\n\n"
+            f"يرجى الضغط هنا: @{bot_info.username} والضغط على (ابدأ / start)، ثم عُد إلى هنا واضغط (انضمام) مجدداً.",
+            show_alert=True
+        )
+        return
+        
+    # 6. Add player to match in registry
+    success = registry.add_player_to_match(match.match_id, user_id, full_name, username)
+    if not success:
+        await callback.answer("⚠️ فشل الانضمام للمباراة (ربما اكتملت الآن).", show_alert=True)
+        return
+        
+    await callback.answer("✅ تم انضمامك بنجاح!")
+
+    # Update channel/group/inline message
+    if len(match.players) == 1:
+        await update_match_message(callback.bot, match)
+            
+    elif len(match.players) == 2:
+        # Match is now full, move to CHOOSING_WORDS
+        match.state = MatchState.CHOOSING_WORDS
+        await update_match_message(callback.bot, match)
+            
+        # Notify both players to input their secret words
+        for p in match.players:
+            try:
+                p_state = FSMContext(
+                    storage=state.storage,
+                    key=StorageKey(
+                        bot_id=callback.bot.id,
+                        chat_id=p.user_id,
+                        user_id=p.user_id
+                    )
+                )
+                await p_state.set_state(PlayerStates.choosing_word)
+                
+                await callback.bot.send_message(
+                    chat_id=p.user_id,
+                    text=f"🏁 <b>اكتمل اللاعبون! بدأت مرحلة اختيار الكلمات.</b>\n\n"
+                         f"يرجى كتابة الشيء أو الكلمة السرية التي ستفكر فيها في هذه المباراة.\n"
+                         f"⚠️ <b>الشرط:</b> يجب أن تكون الكلمة سرية وتنتمي للتصنيف: <b>{match.category}</b>.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"Error starting word choice for player {p.user_id}: {e}")
+
+# Standard Match Join Handler (Channels / Groups)
+@router.callback_query(F.data.startswith("join_match:"))
+async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
+    match_id = callback.data.split(":")[1]
+    match = registry.get_match_by_id(match_id)
+    if not match:
+        await callback.answer("⚠️ لم يتم العثور على المباراة أو تم إلغاؤها.", show_alert=True)
+        return
+    await join_player_to_match_process(callback, state, match)
+
+# On-The-Fly Inline Match Join Handler
+@router.callback_query(F.data.startswith("join_inline:"))
+async def handle_join_inline(callback: types.CallbackQuery, state: FSMContext):
+    category = callback.data.split(":", 1)[1]
+    inline_id = callback.inline_message_id
+    
+    if not inline_id:
+        await callback.answer("⚠️ تعذر التعرف على رسالة التحدي.", show_alert=True)
+        return
+        
+    # Get existing match or create one on-the-fly for this inline message ID!
+    match = registry.get_match_by_inline_id(inline_id)
+    if not match:
+        match = registry.create_inline_match(inline_id, category, callback.from_user.id)
+        
+    await join_player_to_match_process(callback, state, match)
 
 # Game loop organizer to start/continue player turn
 async def start_player_turn(bot, storage, match: Match):
@@ -125,120 +260,6 @@ async def start_player_turn(bot, storage, match: Match):
         )
     except Exception as e:
         print(f"Error sending turn notifications: {e}")
-
-# Player Joins Match from Channel/Group/Inline
-@router.callback_query(F.data.startswith("join_match:"))
-async def handle_join_match(callback: types.CallbackQuery, state: FSMContext):
-    match_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
-    full_name = callback.from_user.full_name
-    username = callback.from_user.username
-    
-    # Get bot info dynamically
-    bot_info = await callback.bot.get_me()
-    
-    # 1. Check if user is already in a match
-    existing_match = registry.get_match_by_user(user_id)
-    if existing_match:
-        await callback.answer("⚠️ أنت بالفعل تشارك في مباراة أخرى حالياً!", show_alert=True)
-        return
-        
-    # 2. Check channel subscription
-    subscribed = await check_subscription(callback.bot, user_id)
-    if not subscribed:
-        await callback.answer(f"⚠️ لا يمكنك الانضمام قبل الاشتراك في القناة الرئيسية {config.REQUIRED_CHANNEL}.", show_alert=True)
-        
-        try:
-            builder = InlineKeyboardBuilder()
-            channel_username = config.REQUIRED_CHANNEL.replace("@", "")
-            builder.button(text=f"📢 الاشتراك في القناة الرئيسية ({config.REQUIRED_CHANNEL})", url=f"https://t.me/{channel_username}")
-            
-            await callback.bot.send_message(
-                chat_id=user_id,
-                text=f"⚠️ <b>عذراً! لا يمكنك الانضمام للمباراة قبل الاشتراك في القناة الرئيسية.</b>\n\n"
-                     f"يرجى الاشتراك في القناة: {config.REQUIRED_CHANNEL} أولاً، ثم عُد واضغط على زر الانضمام مجدداً.",
-                reply_markup=builder.as_markup(),
-                parse_mode="HTML"
-            )
-        except Exception:
-            await callback.answer(
-                f"⚠️ يجب الاشتراك في قناة {config.REQUIRED_CHANNEL}\n"
-                f"ثم الانتقال إلى معرف البوت: @{bot_info.username} والضغط على (ابدأ / start) أولاً لتتمكن من اللعب!",
-                show_alert=True
-            )
-        return
-        
-    # 3. Verify match exists and is open
-    match = registry.get_match_by_id(match_id)
-    if not match:
-        await callback.answer("⚠️ لم يتم العثور على المباراة أو تم إلغاؤها.", show_alert=True)
-        return
-        
-    if match.state != MatchState.JOINING or len(match.players) >= 2:
-        await callback.answer("⚠️ عذراً، اكتمل عدد اللاعبين أو انتهت فترة الانضمام.", show_alert=True)
-        return
-
-    # If it's an inline match and we haven't stored the inline message ID yet
-    if match.channel_id == 0 and not match.channel_message_id:
-        if callback.inline_message_id:
-            match.channel_message_id = callback.inline_message_id
-
-    # 4. Verify if the user has started the bot in private.
-    try:
-        await callback.bot.send_message(
-            chat_id=user_id,
-            text=f"🎮 <b>تم انضمامك لمباراة التخمين بنجاح!</b>\n"
-                 f"🏷️ التصنيف: <b>{match.category}</b>\n\n"
-                 f"⏳ بانتظار انضمام اللاعب الثاني لبدء المباراة...",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await callback.answer(
-            f"⚠️ يجب عليك بدء محادثة مع البوت في الخاص أولاً لتتمكن من الانضمام للعب!\n\n"
-            f"يرجى الضغط هنا: @{bot_info.username} والضغط على (ابدأ / start)، ثم عُد إلى هنا واضغط (انضمام) مجدداً.",
-            show_alert=True
-        )
-        return
-        
-    # 5. Add player to match in registry
-    success = registry.add_player_to_match(match_id, user_id, full_name, username)
-    if not success:
-        await callback.answer("⚠️ فشل الانضمام للمباراة (ربما اكتملت الآن).", show_alert=True)
-        return
-        
-    await callback.answer("✅ تم انضمامك بنجاح!")
-
-    # Update channel/group/inline message
-    if len(match.players) == 1:
-        await update_match_message(callback.bot, match)
-            
-    elif len(match.players) == 2:
-        # Match is now full, move to CHOOSING_WORDS
-        match.state = MatchState.CHOOSING_WORDS
-        await update_match_message(callback.bot, match)
-            
-        # Notify both players to input their secret words
-        for p in match.players:
-            try:
-                p_state = FSMContext(
-                    storage=state.storage,
-                    key=StorageKey(
-                        bot_id=callback.bot.id,
-                        chat_id=p.user_id,
-                        user_id=p.user_id
-                    )
-                )
-                await p_state.set_state(PlayerStates.choosing_word)
-                
-                await callback.bot.send_message(
-                    chat_id=p.user_id,
-                    text=f"🏁 <b>اكتمل اللاعبون! بدأت مرحلة اختيار الكلمات.</b>\n\n"
-                         f"يرجى كتابة الشيء أو الكلمة السرية التي ستفكر فيها في هذه المباراة.\n"
-                         f"⚠️ <b>الشرط:</b> يجب أن تكون الكلمة سرية وتنتمي للتصنيف: <b>{match.category}</b>.",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                print(f"Error starting word choice for player {p.user_id}: {e}")
 
 # Player inputs secret word
 @router.message(PlayerStates.choosing_word)
