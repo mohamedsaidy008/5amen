@@ -41,7 +41,7 @@ async def cmd_start(message: types.Message):
         "👑 <b>أوامر إدارة اللعبة (لمشرفي القنوات والمجموعات):</b>\n"
         "• لبدء مباراة جديدة: /newmatch\n"
         "• لإلغاء مباراة نشطة: /cancelmatch\n\n"
-        "📢 <i>ملاحظة: يشترط استخدام البوت الاشتراك في القناة الرئيسية: {config.REQUIRED_CHANNEL}</i>"
+        "📢 <i>ملاحظة: يشترط استخدام البوت الاشتراك في القناة الرئيسية: @mythikra</i>"
     )
     await message.reply(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
