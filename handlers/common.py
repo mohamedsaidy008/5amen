@@ -10,8 +10,8 @@ router = Router()
 
 def get_detailed_rules() -> str:
     return (
-        "📖 <b>قواعد وتعليمات لعبة Mythikra:</b>\n\n"
-        "Mythikra هي لعبة تفاعلية يتنافس فيها لاعبان لتخمين الكلمة السرية للخصم. "
+        "📖 <b>قواعد وتعليمات لعبة التخمين:</b>\n\n"
+        "لعبة التخمين هي لعبة تفاعلية يتنافس فيها لاعبان لتخمين الكلمة السرية للخصم. "
         "البوت يدير المباراة وينظم الأدوار بالكامل في الخاص، ويعرض تقدم المباراة للجمهور في القناة أو المجموعة.\n\n"
         "🎮 <b>سير اللعبة التفصيلي:</b>\n"
         "1️⃣ <b>بدء اللعبة:</b> ينضم لاعبان للمباراة بالضغط على زر (انضمام).\n"
@@ -32,8 +32,8 @@ async def cmd_start(message: types.Message):
     builder.adjust(1)
     
     text = (
-        "✨ <b>مرحباً بك في بوت لعبة Mythikra!</b> ✨\n\n"
-        "لعبة تخمين الأفكار والكلمات التفاعلية مباشرة داخل قنوات ومجموعات تيليجرام. "
+        "✨ <b>مرحباً بك في بوت لعبة التخمين!</b> ✨\n\n"
+        "لعبة تخمين الأفكار والكلمات التفاعلية مباشرة داخل قنوات ومجموعات تيليجرام والمحادثات الخاصة. "
         "يتنافس لاعبان على تخمين كلمات بعضهما البعض، والجمهور يتابع الحماس!\n\n"
         "🎮 <b>كيف تلعب؟</b>\n"
         "1️⃣ ينضم لاعبان للمباراة من خلال الضغط على زر الانضمام.\n"
@@ -41,7 +41,8 @@ async def cmd_start(message: types.Message):
         "3️⃣ يتبادل اللاعبان الأدوار بطرح الأسئلة أو التخمينات في الخاص.\n\n"
         "👑 <b>أوامر إدارة اللعبة (لمشرفي القنوات والمجموعات):</b>\n"
         "• لبدء مباراة جديدة: /newmatch\n"
-        "• لإلغاء مباراة نشطة: /cancelmatch\n"
+        "• لإلغاء مباراة نشطة: /cancelmatch\n\n"
+        "📢 <i>ملاحظة: يشترط استخدام البوت الاشتراك في القناة الرئيسية: {config.REQUIRED_CHANNEL}</i>"
     )
     await message.reply(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
@@ -57,7 +58,7 @@ async def process_show_rules(callback: types.CallbackQuery):
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
     text = (
-        "ℹ️ <b>تعليمات بوت لعبة Mythikra:</b>\n\n"
+        "ℹ️ <b>تعليمات بوت لعبة التخمين:</b>\n\n"
         "• اللعبة تُلعب بشكل كامل في الخاص مع البوت (لإدخال الأسئلة والإجابات والكلمات السرية)، بينما يتم عرض النتيجة والتقدم في القناة أو المجموعة.\n"
         "• يرجى بدء المحادثة مع البوت في الخاص أولاً قبل الضغط على زر الانضمام لتجنب مشاكل التواصل.\n\n"
         "👑 <b>أوامر الإدارة:</b>\n"
@@ -70,13 +71,15 @@ async def cmd_help(message: types.Message):
 @router.inline_query()
 async def handle_inline_query(inline_query: types.InlineQuery):
     match_id = uuid.uuid4().hex[:8]
-    category = inline_query.query.strip() if inline_query.query.strip() else "عام"
+    user_query = inline_query.query.strip()
+    
+    category = user_query if user_query else "عام"
     
     builder = InlineKeyboardBuilder()
     builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_match:{match_id}")
     
     text = (
-        f"🎮 <b>تحدي لعبة Mythikra جديد!</b>\n"
+        f"🎮 <b>تحدي مباراة تخمين جديدة!</b>\n"
         f"🏷️ <b>التصنيف:</b> {category}\n\n"
         f"⏳ بانتظار انضمام لاعبين اثنين لبدء التحدي..."
     )
@@ -85,15 +88,23 @@ async def handle_inline_query(inline_query: types.InlineQuery):
     match = registry.create_match(0, "مباراة سريعة", category, inline_query.from_user.id)
     match.is_group_match = True
     
-    result = InlineQueryResultArticle(
-        id=match_id,
-        title="🎮 بدء تحدي Mythikra",
-        description=f"ابدأ مباراة تحدي جديدة في تصنيف: {category}",
-        input_message_content=InputTextMessageContent(
-            message_text=text,
-            parse_mode="HTML"
-        ),
-        reply_markup=builder.as_markup()
+    description_text = (
+        f"التصنيف الحالي: ({category}) - اضغط لبدء التحدي"
+        if user_query
+        else "💡 اكتب اسم التصنيف بعد اسم البوت (مثال: @bot أفلام)"
     )
     
-    await inline_query.answer([result], is_personal=True, cache_time=0)
+    results = [
+        InlineQueryResultArticle(
+            id=match_id,
+            title=f"🎮 بدء مباراة تخمين (التصنيف: {category})",
+            description=description_text,
+            input_message_content=InputTextMessageContent(
+                message_text=text,
+                parse_mode="HTML"
+            ),
+            reply_markup=builder.as_markup()
+        )
+    ]
+    
+    await inline_query.answer(results, is_personal=True, cache_time=0)

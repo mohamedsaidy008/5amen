@@ -41,7 +41,7 @@ class Match:
         self.max_questions: Optional[int] = None
         self.max_guesses: Optional[int] = None
         
-        # Flag if match is played in a group instead of a channel
+        # Flag if match is played in a group or via inline query instead of a channel
         self.is_group_match: bool = False
         
         # Pending turn actions
@@ -89,8 +89,8 @@ class Match:
         
         place_label = "المجموعة" if self.is_group_match else "القناة"
         
-        text = f"🎮 <b>مباراة Mythikra جديدة!</b>\n"
-        if not self.is_group_match:
+        text = f"🎮 <b>مباراة تخمين جديدة!</b>\n"
+        if not self.is_group_match and self.channel_id != 0:
             text += f"📢 <b>{place_label}:</b> {self.channel_title}\n"
         text += f"🏷️ <b>التصنيف:</b> {self.category}\n\n"
         
@@ -125,7 +125,7 @@ class Match:
 class MatchRegistry:
     def __init__(self):
         self.active_matches: Dict[str, Match] = {}       # match_id -> Match
-        self.channel_matches: Dict[int, Match] = {}      # channel_id -> Match
+        self.channel_matches: Dict[int, Match] = {}      # channel_id -> Match (excluding 0)
         self.user_matches: Dict[int, Match] = {}         # user_id -> Match (currently playing)
         self.admin_creation: Dict[int, dict] = {}        # admin_id -> temp match creation state
         
@@ -143,6 +143,8 @@ class MatchRegistry:
             return {}
 
     def save_channel(self, channel_id: int, channel_title: str):
+        if channel_id == 0:
+            return
         channels = self.load_saved_channels()
         channels[str(channel_id)] = channel_title
         try:
@@ -155,8 +157,8 @@ class MatchRegistry:
         # Generate short unique match ID
         match_id = uuid.uuid4().hex[:8]
         
-        # If there's already a match in this channel/group, we will replace/cancel it
-        if channel_id in self.channel_matches:
+        # Only replace existing match if it's a specific channel/group (channel_id != 0)
+        if channel_id != 0 and channel_id in self.channel_matches:
             old_match = self.channel_matches[channel_id]
             self.remove_match(old_match.match_id)
             
@@ -164,13 +166,16 @@ class MatchRegistry:
         match.state = MatchState.JOINING
         
         self.active_matches[match_id] = match
-        self.channel_matches[channel_id] = match
+        if channel_id != 0:
+            self.channel_matches[channel_id] = match
         return match
 
     def get_match_by_id(self, match_id: str) -> Optional[Match]:
         return self.active_matches.get(match_id)
 
     def get_match_by_channel(self, channel_id: int) -> Optional[Match]:
+        if channel_id == 0:
+            return None
         return self.channel_matches.get(channel_id)
 
     def get_match_by_user(self, user_id: int) -> Optional[Match]:
@@ -197,7 +202,7 @@ class MatchRegistry:
                 del self.user_matches[p.user_id]
                 
         # Remove from channel_matches
-        if match.channel_id in self.channel_matches:
+        if match.channel_id != 0 and match.channel_id in self.channel_matches:
             del self.channel_matches[match.channel_id]
             
         # Remove from active_matches

@@ -23,7 +23,7 @@ async def cmd_newmatch(message: types.Message, state: FSMContext):
         )
         await state.set_state(AdminStates.waiting_for_category)
         await message.reply(
-            "🎮 <b>بدء مباراة Mythikra جديدة في هذه المجموعة!</b>\n\n"
+            "🎮 <b>بدء مباراة تخمين جديدة في هذه المجموعة!</b>\n\n"
             "🏷️ يرجى كتابة <b>تصنيف المباراة</b> الآن كرسالة نصية مباشرة (مثال: <code>الحيوانات</code>، <code>الدول</code>، <code>كرة القدم</code>):",
             parse_mode="HTML"
         )
@@ -261,7 +261,7 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
     
     # Create join button
     builder = InlineKeyboardBuilder()
-    builder.button(text="🎮 انضمام", callback_data=f"join_match:{match.match_id}")
+    builder.button(text="🎮 انضمام للمباراة", callback_data=f"join_match:{match.match_id}")
     
     match.state = MatchState.JOINING
     
@@ -284,7 +284,7 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
         
         if is_group_match:
             await message.reply(
-                f"✅ <b>بدأت مرحلة الانضمام داخل هذه المجموعة!</b>\n"
+                f"✅ <b>بدأت مرحلة الانضمام لمباراة التخمين في هذه المجموعة!</b>\n"
                 f"🏷️ التصنيف: <b>{category}</b>\n"
                 f"❓ حد الأسئلة: {q_limit_str}\n"
                 f"🎯 حد التخمينات: {g_limit_str}\n\n"
@@ -314,7 +314,6 @@ async def setup_match(message: types.Message, state: FSMContext, data: dict):
 # Cancel Match Command
 @router.message(Command("cancelmatch"))
 async def cmd_cancelmatch(message: types.Message):
-    # If in group, check if there's a match in this group, and let anyone cancel (or check creator/admin)
     if message.chat.type in ["group", "supergroup"]:
         match = registry.get_match_by_channel(message.chat.id)
         if not match:
@@ -322,15 +321,13 @@ async def cmd_cancelmatch(message: types.Message):
             return
             
         builder = InlineKeyboardBuilder()
-        builder.button(text="❌ إلغاء المباراة جارية", callback_data=f"cancel_match:{match.match_id}")
+        builder.button(text="❌ إلغاء المباراة الجارية", callback_data=f"cancel_match:{match.match_id}")
         await message.reply("🛡️ هل أنت متأكد من إلغاء المباراة الحالية؟", reply_markup=builder.as_markup())
         return
 
-    # If in private
     my_matches = []
     for m in registry.active_matches.values():
         try:
-            # For group matches, creator of match is the creator_id
             if m.is_group_match:
                 if m.creator_id == message.chat.id:
                     my_matches.append(m)
@@ -360,7 +357,6 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ المباراة غير موجودة أو انتهت بالفعل.", show_alert=True)
         return
         
-    # Verify cancellation permissions
     if not match.is_group_match:
         try:
             user_member = await callback.bot.get_chat_member(match.channel_id, callback.from_user.id)
@@ -371,12 +367,11 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer("⚠️ فشل التحقق من صلاحيات الإشراف الخاصة بك.", show_alert=True)
             return
             
-    # Notify players
     for p in match.players:
         try:
             await callback.bot.send_message(
                 chat_id=p.user_id,
-                text="⚠️ <b>تم إيقاف وإلغاء المباراة الحالية من قبل المدير.</b>",
+                text="⚠️ <b>تم إيقاف وإلغاء مباراة التخمين الحالية من قبل المدير.</b>",
                 reply_markup=types.ReplyKeyboardRemove(),
                 parse_mode="HTML"
             )
@@ -392,17 +387,15 @@ async def handle_cancel_match(callback: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             print(f"Error notifying player: {e}")
             
-    # Delete the channel/group message
     try:
         await callback.bot.delete_message(chat_id=match.channel_id, message_id=match.channel_message_id)
     except Exception as e:
         print(f"Error deleting message: {e}")
         
-    # Post cancellation notification in channel/group
     try:
         await callback.bot.send_message(
             chat_id=match.channel_id,
-            text=f"🛑 <b>مباراة لغز التخمين (التصنيف: {match.category}) تم إلغاؤها.</b>",
+            text=f"🛑 <b>مباراة التخمين (التصنيف: {match.category}) تم إلغاؤها.</b>",
             parse_mode="HTML"
         )
     except Exception as e:
